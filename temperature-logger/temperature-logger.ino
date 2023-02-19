@@ -9,24 +9,34 @@
 *
 *  File Name           : temperature-logger.ino
 *
-*  Description         : It sample source file
+*  Description         : Temperature logger using arduino uno.
+                        Components : 
+                        1. Temperature Sensor : DS18B20
+                        2. LCD : 16 x 2 Alphanumeric LCD
+                        3. SD card
+                        4. RTC
+                        
+                        Features : 
+                        1. Loggs temperature data into SD card at the interval 
+                        specefied by LOGGER_INTERVAL_DATA_LOG macro defined.
 *
 *  Change history      : 
 *
 *     Author        Date          Ver                 Description
 *  ------------    --------       ---   --------------------------------------
 *  Riken Maharjan  19 Feb 2023    1.0               Initial Creation
+*  Lomas Subedi    20 Feb 2023    1.1               Organized
 *  
 *******************************************************************************/
 
 /*******************************************************************************
 *                          Include Files
 *******************************************************************************/
-#include <OneWire.h>
-#include <DallasTemperature.h>
 #include <SPI.h>
 #include <Wire.h>
 #include <SD.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
 #include <LiquidCrystal.h>
 #include "RTClib.h"
 #include <MemoryFree.h>
@@ -34,40 +44,87 @@
 /*******************************************************************************
 *                          Type & Macro Definitions
 *******************************************************************************/
-#define GPIO_SYS_LED        8
-#define ONE_WIRE_BUS        9 // Data wire is plugged into port 2 on the Arduino
+#define LOGGER_GPIO_SYS_LED             8
+#define LOGGER_ONE_WIRE_BUS             9 // Data wire is plugged into port 2 on the Arduino
+#define LOGGER_GPIO_SPI_CS              10
 
-#define GPIO_LCD_PIN_RS     7
-#define GPIO_LCD_PIN_EN     6
-#define GPIO_LCD_PIN_D4     5
-#define GPIO_LCD_PIN_D5     4
-#define GPIO_LCD_PIN_D6     3
-#define GPIO_LCD_PIN_D7     2
+#define LOGGER_GPIO_LCD_PIN_RS          7
+#define LOGGER_GPIO_LCD_PIN_EN          6
+#define LOGGER_GPIO_LCD_PIN_D4          5
+#define LOGGER_GPIO_LCD_PIN_D5          4
+#define LOGGER_GPIO_LCD_PIN_D6          3
+#define LOGGER_GPIO_LCD_PIN_D7          2
 
-#define TEMP_LOGGER_LOG_FILENAME  "log.csv"
 
-#define TEMP_LOGGER_LOG_INTERVAL    10000
+#define LOGGER_LOG_FILENAME             "log.csv"
+#define LOGGER_INTERVAL_DATA_LOG        10000
+#define LOGGER_SERIAL_BAUD              115200
+#define LOGGER_TMP_THRESHOLD            8.00f
+
+#define LOGGER_LCD_SIZE_STRING          (uint8_t)(16)
+#define LOGGER_LCD_SIZE_DATE            (uint8_t)(8)
+#define LOGGER_LCD_SIZE_TIME            (uint8_t)(9)
+#define LOGGER_LCD_SYMBOL_DEGREE        (uint8_t)(0xDF)
+
+
+enum logger_error {
+  LOGGER_ERROR_NONE,
+  LOGGER_ERROR_RTC,
+  LOGGER_ERROR_SD_ACCESS = 2,
+  LOGGER_ERROR_FILE_ACCESS = 4,
+  LOGGER_ERROR_SENSOR = 8
+};
+
+// #define LOGGER_ERROR_NONE               0
+// #define LOGGER_ERROR_RTC                1
+// #define LOGGER_ERROR_SD_ACCESS          2
+// #define LOGGER_ERROR_FILE_ACCESS        4
+// #define LOGGER_ERROR_SENSOR             8
+
 
 #define SERIAL_DEBUG
+
+/**
+ * Time and Temperature data structure
+*/
+struct logger_data_rtc_temp {
+  uint8_t data_rtc_year;
+  uint8_t data_rtc_month;
+  uint8_t data_rtc_day;
+  uint8_t data_rtc_hour;
+  uint8_t data_rtc_minute;
+  uint8_t data_rtc_second;
+  float data_sensor_temperature_c;
+};
 
 /*******************************************************************************
 *                          Static Data Definitions
 *******************************************************************************/
-// Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
-OneWire oneWire(ONE_WIRE_BUS);
+// Setup a logger_one_wire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
+OneWire logger_one_wire(LOGGER_ONE_WIRE_BUS);
 
-// Pass our oneWire reference to Dallas Temperature. 
-DallasTemperature sensors(&oneWire);
+// Pass our logger_one_wire reference to Dallas Temperature. 
+DallasTemperature logger_sensor_temp_ds18b20(&logger_one_wire);
 
-DeviceAddress insideThermometer;
+DeviceAddress logger_sensor_temp_address;
 
-LiquidCrystal lcd(GPIO_LCD_PIN_RS, GPIO_LCD_PIN_EN, GPIO_LCD_PIN_D4, GPIO_LCD_PIN_D5, GPIO_LCD_PIN_D6, GPIO_LCD_PIN_D7);
 
-File temp_logger_file;
-RTC_DS1307 rtc;  
+LiquidCrystal logger_lcd_16x2(LOGGER_GPIO_LCD_PIN_RS, 
+                              LOGGER_GPIO_LCD_PIN_EN, 
+                              LOGGER_GPIO_LCD_PIN_D4, 
+                              LOGGER_GPIO_LCD_PIN_D5, 
+                              LOGGER_GPIO_LCD_PIN_D6, 
+                              LOGGER_GPIO_LCD_PIN_D7);
+
+File logger_log_file_handle;
+RTC_DS1307 logger_rtc_ds1307;
+
+enum logger_error logger_error_global;
 
 int yr,mo,dy,hr,mi,se;
 float TempC; 
+
+struct logger_data_rtc_temp logger;
 
 uint32_t time_now = 0;
 uint32_t time_prev = 0;
@@ -75,28 +132,68 @@ uint32_t time_prev = 0;
 /*******************************************************************************
 *                          Static Function Definitions
 *******************************************************************************/
-// function to print in LCD
-void LCD_print() {
-  char b[16];
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("TEMP: ");
-  lcd.print(TempC);
-  lcd.print((char)0xDF);
-  lcd.print("C");
-  lcd.setCursor(0, 1);
-  snprintf(b,8,"%d/%d,",mo,dy);
-  lcd.print(b);
-  lcd.setCursor(7, 1);
-  snprintf(b,9,"%d:%d:%d",hr,mi,se);
-  lcd.print(b);
+void logger_lcd_set_cursor_first_line(void) {
+    logger_lcd_16x2.setCursor(0, 0);
+}
+
+void logger_lcd_set_cursor_second_line(void) {
+    logger_lcd_16x2.setCursor(0, 1);
+}
+
+void logger_sysled_set() {
+  digitalWrite(LOGGER_GPIO_SYS_LED, HIGH);
+}
+
+void logger_sysled_clear() {
+  digitalWrite(LOGGER_GPIO_SYS_LED, LOW);
+}
+
+void logger_lcd_write_string(const char * msg) { 
+  logger_lcd_16x2.clear();
+  logger_lcd_16x2.print(msg);
+}
+
+void logger_get_rtc_data(struct logger_data_rtc_temp *d) {
+  
+  DateTime NOW = logger_rtc_ds1307.now();
+  d->data_rtc_year = NOW.year();
+  d->data_rtc_month = NOW.month();
+  d->data_rtc_day = NOW.day();
+  d->data_rtc_hour = NOW.hour();
+  d->data_rtc_minute = NOW.minute();
+  d->data_rtc_second = NOW.second();
+
+}
+
+void logger_lcd_write_data(struct logger_data_rtc_temp d) {
+  
+  char lcd_string[LOGGER_LCD_SIZE_STRING];
+  
+  logger_lcd_16x2.clear();
+  
+  logger_lcd_set_cursor_first_line();
+  
+  // Print Temperature data
+  logger_lcd_16x2.print("TEMP: ");
+  logger_lcd_16x2.print(d.data_sensor_temperature_c);
+  logger_lcd_16x2.print((char)LOGGER_LCD_SYMBOL_DEGREE);
+  logger_lcd_16x2.print("C");
+
+  logger_lcd_set_cursor_second_line();
+
+  snprintf(lcd_string,LOGGER_LCD_SIZE_DATE,"%d/%d,", d.data_rtc_month, d.data_rtc_day);
+  logger_lcd_16x2.print(lcd_string);
+
+  logger_lcd_16x2.setCursor(7, 1);
+  snprintf(lcd_string,LOGGER_LCD_SIZE_TIME,"%d:%d:%d", d.data_rtc_hour, d.data_rtc_minute, d.data_rtc_second);
+  logger_lcd_16x2.print(lcd_string);
 }
 
 // function to get the temperature for a device
 
-float printTemperature(DeviceAddress deviceAddress) {
-  float tempC = sensors.getTempC(deviceAddress);
-  if(tempC == DEVICE_DISCONNECTED_C) {
+float logger_get_temperature(DeviceAddress deviceAddress) {
+  float tempC = logger_sensor_temp_ds18b20.getTempC(deviceAddress);
+  if(tempC == DEVICE_DISCONNECTED) {
     #ifdef SERIAL_DEBUG
     Serial.println(F("Error: Could not read temperature data"));
     #endif // End SERIAL_DEBUG
@@ -118,165 +215,182 @@ void printAddress(DeviceAddress deviceAddress) {
 //-----------------------------------------------------------------------------------------
 
 void setup(void) {
-  pinMode(GPIO_SYS_LED, OUTPUT); // System Led is taken as OUTPUT
-  #ifdef SERIAL_DEBUG
-  Serial.begin(9600);
-  #endif
-  // set up the LCD's number of columns and rows:
-  lcd.begin(16, 2);
-  #ifdef SERIAL_DEBUG
-  Serial.println(F("------- Temperature LOGs -----"));
-  #endif
-  lcd.print("Temperature LOGs");
-  // Initialize RTC
-    #ifdef SERIAL_DEBUG
-    Serial.println(F("Initializing RTC Module..."));
-    #endif
-    digitalWrite(GPIO_SYS_LED,HIGH);
-    if (!rtc.begin())  {
-      #ifdef SERIAL_DEBUG
-      Serial.println(F("Couldn't find RTC"));
-      #endif
-      while (1);
-    }
-    digitalWrite(GPIO_SYS_LED,LOW);
   
-    if (! rtc.isrunning()) {
-      #ifdef SERIAL_DEBUG
-      Serial.println(F("RTC is NOT running, let's set the time!"));
-      #endif
-      rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-    }
+  logger_error_global = LOGGER_ERROR_NONE;
+
+  pinMode(LOGGER_GPIO_SYS_LED, OUTPUT); // System Led is taken as OUTPUT
+  
+  #ifdef SERIAL_DEBUG
+  Serial.begin(LOGGER_SERIAL_BAUD);
+  #endif
+
+  // set up the LCD's number of columns and rows:
+  logger_lcd_16x2.begin(LOGGER_LCD_SIZE_STRING, 2);
+
+  logger_lcd_16x2.clear();  
+  logger_lcd_write_string("Nepal Digital Systems Pvt. Ltd.");
+  logger_lcd_set_cursor_second_line();
+  logger_lcd_write_string("Dhobighat, Lalitpur. Ph : 9841784514");
+  logger_lcd_16x2.scrollDisplayLeft();
+  delay(15000);
+
+
+  if (!logger_rtc_ds1307.begin())  {
+    #ifdef SERIAL_DEBUG
+    Serial.println(F("Couldn't find RTC!\r\n Please reset device !"));    
+    #endif
+
+    logger_lcd_write_string("Couldn't find RTC!\r\n Please reset device !");
+    logger_error_global |= LOGGER_ERROR_RTC;
+  }
+    
+  
+  if (!logger_rtc_ds1307.isrunning()) {
+    #ifdef SERIAL_DEBUG
+    Serial.println(F("RTC is NOT running, setting new time !"));
+    #endif
+
+    logger_lcd_write_string("RTC is NOT running\r\n, setting new time !");
+
+    logger_rtc_ds1307.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  }
 
   // locate sensor
     #ifdef SERIAL_DEBUG
     Serial.print(F("Locating Temperature sensor..."));
     #endif
-    sensors.begin();
+
+    logger_sensor_temp_ds18b20.begin();
+
+
     #ifdef SERIAL_DEBUG
     Serial.print(F("Found "));
-    Serial.print(sensors.getDeviceCount(), DEC);
+    Serial.print(logger_sensor_temp_ds18b20.getDeviceCount(), DEC);
     Serial.println(F(" devices."));
     #endif
 
     // report parasite power requirements
     #ifdef SERIAL_DEBUG
     Serial.print(F("Parasite power is: "));     
-    if (sensors.isParasitePowerMode()) Serial.println(F("ON"));
+    if (logger_sensor_temp_ds18b20.isParasitePowerMode()) Serial.println(F("ON"));
     else Serial.println(F("OFF"));
     #endif
     
     #ifdef SERIAL_DEBUG
-    if (!sensors.getAddress(insideThermometer, 0)) Serial.println(F("Unable to find address for Device 0")); 
+    if (!logger_sensor_temp_ds18b20.getAddress(logger_sensor_temp_address, 0)) Serial.println(F("Unable to find address for Device 0")); 
     // show the addresses we found on the bus
     Serial.print(F("Device 0 Address: "));
     #endif
-    printAddress(insideThermometer);
+    printAddress(logger_sensor_temp_address);
     #ifdef SERIAL_DEBUG
     Serial.println();
     #endif
     // set the resolution to 9 bit (Each Dallas/Maxim device is capable of several different resolutions)
-    sensors.setResolution(insideThermometer, 9);
+    logger_sensor_temp_ds18b20.setResolution(logger_sensor_temp_address, 9);
     #ifdef SERIAL_DEBUG
     Serial.print(F("Device 0 Resolution: "));
-    Serial.print(sensors.getResolution(insideThermometer), DEC); 
+    Serial.print(logger_sensor_temp_ds18b20.getResolution(logger_sensor_temp_address), DEC); 
     Serial.println();
     #endif
   // Initialize SD card
     #ifdef SERIAL_DEBUG
     Serial.print(F("Initializing SD card..."));
     #endif
-    digitalWrite(GPIO_SYS_LED,HIGH);
-    if (!SD.begin(GPIO_SPI_CS))  {
-      lcd.setCursor(0, 1);
-      lcd.print("...NO SDCARD...");
-      #ifdef SERIAL_DEBUG
-      Serial.println(F("Card failed, or not present"));
-      #endif
-      while (1);
-    }
-    digitalWrite(GPIO_SYS_LED,LOW);
+    
+  if (!SD.begin(LOGGER_GPIO_SPI_CS))  {
+    
+    logger_lcd_write_string("...NO SDCARD...");
+
+    #ifdef SERIAL_DEBUG
+    Serial.println(F("Card failed, or not present"));
+    #endif
+    
+    logger_error_global |= LOGGER_ERROR_SD_ACCESS;
+  }
+
   #ifdef SERIAL_DEBUG
   Serial.println(F("card initialized."));
-  Serial.println(F(" -------------  Initialization done. ------------- "));
   #endif
-  lcd.setCursor(0, 1);
-  lcd.print("Init .... done");  
+
+  logger_lcd_write_string("Init .... done");  
+  
   #ifdef SERIAL_DEBUG
   Serial.flush();
   #endif
+
+  if(logger_error_global) {
+    logger_lcd_write_string("Error occured!");
+    return;
+  }
+
 }
 
 
-void loop(void) { 
-  DateTime NOW = rtc.now();
-  yr = NOW.year();
-  mo = NOW.month();
-  dy = NOW.day();
-  hr = NOW.hour();
-  mi = NOW.minute();
-  se = NOW.second();
-  
-  // call sensors.requestTemperatures() to issue a global temperature 
-  // request to all devices on the bus
-  #ifdef SERIAL_DEBUG
-  Serial.print(F("Requesting temperatures..."));
-  #endif
+void loop(void) {
 
-  sensors.requestTemperatures(); // Send the command to get temperatures
-  #ifdef SERIAL_DEBUG
-  Serial.println(F("DONE"));
-  #endif
+  logger_get_rtc_data(&logger);
+  
+  // call logger_sensor_temp_ds18b20.requestTemperatures() to issue a global temperature 
+  // request to all devices on the bus
+  logger_sensor_temp_ds18b20.requestTemperatures(); // Send the command to get temperatures
+
   // It responds almost immediately. Let's print out the data
-  TempC = printTemperature(insideThermometer); // Use a simple function to print out the data
+  logger.data_sensor_temperature_c = logger_get_temperature(logger_sensor_temp_address); // Use a simple function to print out the data
 
   // show in LCD display
-  LCD_print();
+  logger_lcd_write_data(logger);
 
-  if((millis() - time_prev) >= TEMP_LOGGER_LOG_INTERVAL) {
+  if(logger.data_sensor_temperature_c > LOGGER_TMP_THRESHOLD ) {
+    logger_sysled_set();
+  } else {
+    logger_sysled_clear();
+  }
+
+  if((millis() - time_prev) >= LOGGER_INTERVAL_DATA_LOG) {
     time_prev = millis();
-    temp_logger_file = SD.open(TEMP_LOGGER_LOG_FILENAME, FILE_WRITE);
+    logger_log_file_handle = SD.open(LOGGER_LOG_FILENAME, FILE_WRITE);
     // if the file opened okay, write to it:
-    if (temp_logger_file) {
-      digitalWrite(GPIO_SYS_LED,HIGH);
+    if (logger_log_file_handle) {
+      digitalWrite(LOGGER_GPIO_SYS_LED,HIGH);
       #ifdef SERIAL_DEBUG
       Serial.println(F("Writing to SD card..."));
       #endif
       // write Date - timestamp
-      temp_logger_file.print(yr, DEC);
-      temp_logger_file.print('-');
-      temp_logger_file.print(mo, DEC);
-      temp_logger_file.print('-');
-      temp_logger_file.print(dy, DEC);
-      temp_logger_file.print(',');// delimiter 
+      logger_log_file_handle.print(yr, DEC);
+      logger_log_file_handle.print('-');
+      logger_log_file_handle.print(mo, DEC);
+      logger_log_file_handle.print('-');
+      logger_log_file_handle.print(dy, DEC);
+      logger_log_file_handle.print(',');// delimiter 
 
       // write Time - timestamp
-      temp_logger_file.print(hr, DEC);
-      temp_logger_file.print(':');
-      temp_logger_file.print(mi, DEC);
-      temp_logger_file.print(':');
-      temp_logger_file.print(se, DEC);
-      temp_logger_file.print(","); // delimiter 
+      logger_log_file_handle.print(hr, DEC);
+      logger_log_file_handle.print(':');
+      logger_log_file_handle.print(mi, DEC);
+      logger_log_file_handle.print(':');
+      logger_log_file_handle.print(se, DEC);
+      logger_log_file_handle.print(","); // delimiter 
       
       // write Temperature Data    
-      temp_logger_file.print(TempC,5);
-      temp_logger_file.write("\n"); // new line
+      logger_log_file_handle.print(TempC,5);
+      logger_log_file_handle.write("\n"); // new line
       // close the file:
-      temp_logger_file.close();
+      logger_log_file_handle.close();
       #ifdef SERIAL_DEBUG
       Serial.println(F("done....."));
       #endif
-      digitalWrite(GPIO_SYS_LED,LOW);
+      digitalWrite(LOGGER_GPIO_SYS_LED,LOW);
     }  else  {
-      digitalWrite(GPIO_SYS_LED,HIGH);
+      digitalWrite(LOGGER_GPIO_SYS_LED,HIGH);
       #ifdef SERIAL_DEBUG
       // if the file didn't open, print an error:
       Serial.println(F("error opening SD card"));
       #endif
-      lcd.setCursor(0, 1);
-      lcd.print("ERROR IN SDCARD");
+      logger_lcd_16x2.setCursor(0, 1);
+      logger_lcd_16x2.print("ERROR IN SDCARD");
     }
   }
+  
   #ifdef SERIAL_DEBUG
   Serial.print(F("freeMemory()="));
   Serial.println(freeMemory());
