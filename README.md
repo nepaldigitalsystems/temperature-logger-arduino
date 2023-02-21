@@ -27,6 +27,7 @@ To use this project, follow these steps:
 3. Open the project file in the PlatformIo IDE.
 4. Upload the code to the Arduino Uno board.
 5. Monitor the output on the LCD or retrieve the data from the SD card.
+6. Sample log ![file](https://github.com/nepaldigitalsystems/temperature-logger-arduino/blob/main/res/LOG.CSV) 
 
 ## Contributing
 
