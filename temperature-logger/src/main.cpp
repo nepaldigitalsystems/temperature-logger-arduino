@@ -64,7 +64,6 @@
 #define LOGGER_SENSOR_RESOLUTION        12
 #define LOGGER_ERROR_LCD_DELAY          2000
 #define LOGGER_SIZE_RTC_STRING          150
-#define LOGGER_SIZE_UART_BFFR           200
 
 #define LOGGER_LCD_SIZE_STRING          (uint8_t)(16)
 #define LOGGER_LCD_SIZE_DATE            (uint8_t)(8)
@@ -85,7 +84,7 @@ enum logger_error {
  * Time and Temperature data structure
 */
 struct logger_data_rtc_temp {
-  uint8_t data_rtc_year;
+  uint16_t data_rtc_year;
   uint8_t data_rtc_month;
   uint8_t data_rtc_day;
   uint8_t data_rtc_hour;
@@ -97,7 +96,8 @@ struct logger_data_rtc_temp {
 /*******************************************************************************
 *                          Static Data Definitions
 *******************************************************************************/
-// Setup a logger_one_wire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
+// Setup a logger_one_wire instance to communicate with any 
+// OneWire devices (not just Maxim/Dallas temperature ICs)
 OneWire logger_one_wire(LOGGER_ONE_WIRE_BUS);
 
 // Pass our logger_one_wire reference to Dallas Temperature. 
@@ -114,14 +114,14 @@ LiquidCrystal logger_lcd_16x2(LOGGER_GPIO_LCD_PIN_RS,
                               LOGGER_GPIO_LCD_PIN_D7);
 
 File logger_log_file_handle;
+
 RTC_DS1307 logger_rtc_ds1307;
 
 enum logger_error logger_error_global;
+
 struct logger_data_rtc_temp logger;
 
 StaticJsonDocument<LOGGER_SIZE_RTC_STRING> logger_rtc_json_buffer;
-
-char logger_buffer_serial[LOGGER_SIZE_UART_BFFR];
 
 uint32_t logger_log_time_prev = 0;
 
@@ -148,31 +148,78 @@ void logger_error_clear() {
   logger_error_global = LOGGER_ERROR_NONE;  
 }
 
-void logger_lcd_write_string(const char * msg) { 
+/**
+ * @brief Write string to LCD 
+ * 
+ * @param msg String to write
+ */
+void logger_lcd_write_string(const char * msg) {
+  
+  logger_lcd_16x2.clear();
+  uint8_t len = strlen(msg);
+  uint8_t numChunks = len / LOGGER_LCD_SIZE_STRING;
+  uint8_t remainder = len % LOGGER_LCD_SIZE_STRING;
+  char chunk[LOGGER_LCD_SIZE_STRING + 1];
+  int startIndex;
+  for (int i = 0; i < numChunks; i++) {
+    startIndex = i * LOGGER_LCD_SIZE_STRING;
+    strncpy(chunk, msg + startIndex, LOGGER_LCD_SIZE_STRING);
+    chunk[16] = '\0';
+    logger_lcd_16x2.setCursor(0, i);
+    logger_lcd_16x2.print(chunk);
+  }
+  if (remainder > 0) {
+    startIndex = numChunks * LOGGER_LCD_SIZE_STRING;
+    strncpy(chunk, msg + startIndex, remainder);
+    chunk[remainder] = '\0';
+    logger_lcd_16x2.setCursor(0, numChunks);
+    logger_lcd_16x2.print(chunk);
+  }  
+
+  delay(1000);
+}
+
+/**
+ * @brief Write temperate and date time data to LCD
+ * 
+ * @param d logger data handle
+ */
+void logger_lcd_write_data(struct logger_data_rtc_temp d) {
+  
+  char lcd_string[LOGGER_LCD_SIZE_STRING];
   
   logger_lcd_16x2.clear();
   
-  uint8_t i = 0;
   logger_lcd_set_cursor_first_line();
-  while(i < LOGGER_LCD_SIZE_STRING) {
-    if(*msg == 0) break;
-    logger_lcd_16x2.write(*msg);
-    msg++;
-    i++;
-  }
+  
+  // Print Temperature data
+  logger_lcd_16x2.print("TEMP: ");
+  logger_lcd_16x2.print(d.data_sensor_temperature_c);
+  logger_lcd_16x2.print((char)LOGGER_LCD_SYMBOL_DEGREE);
+  logger_lcd_16x2.print("C");
 
   logger_lcd_set_cursor_second_line();
-  i = 0;
-  while(i < LOGGER_LCD_SIZE_STRING) {
-    if(*msg == 0) break;
-    logger_lcd_16x2.write(*msg);
-    msg++;
-    i++;
-  }
-  
+
+  snprintf(lcd_string,LOGGER_LCD_SIZE_DATE,"%d/%d,", d.data_rtc_month, d.data_rtc_day);
+  logger_lcd_16x2.print(lcd_string);
+
+  logger_lcd_16x2.setCursor(7, 1);
+  snprintf(lcd_string,LOGGER_LCD_SIZE_TIME,"%d:%d:%d", d.data_rtc_hour, d.data_rtc_minute, d.data_rtc_second);
+  logger_lcd_16x2.print(lcd_string);
 }
 
+/**
+ * @brief Print error to the LCD
+ * 
+ * @param e : Error object
+ */
 void logger_lcd_print_error(enum logger_error e) { 
+  
+  
+  if(!e) {
+    return;
+  }
+
   logger_lcd_16x2.clear();
   
   logger_lcd_set_cursor_first_line();
@@ -209,9 +256,15 @@ void logger_lcd_print_error(enum logger_error e) {
   }      
 }
 
+/**
+ * @brief get date and time data from RTC
+ * 
+ * @param d pointer logger data
+ */
 void logger_get_rtc_data(struct logger_data_rtc_temp *d) {
   
   DateTime NOW = logger_rtc_ds1307.now();
+
   d->data_rtc_year = NOW.year();
   d->data_rtc_month = NOW.month();
   d->data_rtc_day = NOW.day();
@@ -221,30 +274,33 @@ void logger_get_rtc_data(struct logger_data_rtc_temp *d) {
 
 }
 
-void logger_lcd_write_data(struct logger_data_rtc_temp d) {
+/**
+ * @brief function to get the temperature for a device
+ * 
+ * @param deviceAddress : Address of the temperature sensor
+ * @return float temperature data
+ */
+float logger_get_temperature(DeviceAddress deviceAddress) {
+  float tempC = logger_sensor_temp_ds18b20.getTempC(deviceAddress);
+  if(tempC == DEVICE_DISCONNECTED) {
+    logger_error_global |= LOGGER_ERROR_SENSOR;
+    #ifdef SERIAL_DEBUG
+    Serial.println(F("Error: Could not read temperature data"));
+    #endif // End SERIAL_DEBUG
+  }
   
-  char lcd_string[LOGGER_LCD_SIZE_STRING];
-  
-  logger_lcd_16x2.clear();
-  
-  logger_lcd_set_cursor_first_line();
-  
-  // Print Temperature data
-  logger_lcd_16x2.print("TEMP: ");
-  logger_lcd_16x2.print(d.data_sensor_temperature_c);
-  logger_lcd_16x2.print((char)LOGGER_LCD_SYMBOL_DEGREE);
-  logger_lcd_16x2.print("C");
-
-  logger_lcd_set_cursor_second_line();
-
-  snprintf(lcd_string,LOGGER_LCD_SIZE_DATE,"%d/%d,", d.data_rtc_month, d.data_rtc_day);
-  logger_lcd_16x2.print(lcd_string);
-
-  logger_lcd_16x2.setCursor(7, 1);
-  snprintf(lcd_string,LOGGER_LCD_SIZE_TIME,"%d:%d:%d", d.data_rtc_hour, d.data_rtc_minute, d.data_rtc_second);
-  logger_lcd_16x2.print(lcd_string);
+  #ifdef SERIAL_DEBUG
+  Serial.print(F("Temp C: "));
+  Serial.println(tempC);
+  #endif 
+  return tempC;
 }
 
+/**
+ * @brief Append csv file content with passed data
+ * 
+ * @param d logger data
+ */
 void logger_file_append(struct logger_data_rtc_temp d) {
 
   #ifdef SERIAL_DEBUG
@@ -270,59 +326,13 @@ void logger_file_append(struct logger_data_rtc_temp d) {
   logger_log_file_handle.print(d.data_sensor_temperature_c,5);
   logger_log_file_handle.write("\n"); // new line
 }
-// function to get the temperature for a device
 
-float logger_get_temperature(DeviceAddress deviceAddress) {
-  float tempC = logger_sensor_temp_ds18b20.getTempC(deviceAddress);
-  if(tempC == DEVICE_DISCONNECTED) {
-    logger_error_global |= LOGGER_ERROR_SENSOR;
-    #ifdef SERIAL_DEBUG
-    Serial.println(F("Error: Could not read temperature data"));
-    #endif // End SERIAL_DEBUG
-  }
-  
-  #ifdef SERIAL_DEBUG
-  Serial.print(F("Temp C: "));
-  Serial.println(tempC);
-  #endif 
-  return tempC;
-}
-
-uint16_t logger_serial_readline(char *buff, uint16_t maxbuff) {
-  uint16_t buffidx = 0;
-  uint16_t timeout = 500;
-  boolean timeoutvalid = true;
-
-  while (true) {
-    if (buffidx > maxbuff) {
-      break;
-    }
-
-    while (Serial.available()) {
-      char c =  Serial.read();
-
-      if (c == '\r') continue;
-      if (c == '\n') {
-        if (buffidx == 0)
-          continue;
-
-        timeout = 0;   
-        timeoutvalid = true;
-        break;
-      }
-      buff[buffidx] = c;
-      buffidx++;
-    }
-
-    if (timeoutvalid && timeout == 0) {  
-      break;
-    }
-    delay(1);
-  }
-  buff[buffidx] = 0;
-  return buffidx;
-}
-
+/**
+ * @brief update RTC data from the data which is recieved from serial
+ *        communication
+ * 
+ * @param d logger data
+ */
 void logger_rtc_update(struct logger_data_rtc_temp d) {
 
   DateTime date_time = DateTime(d.data_rtc_year, 
@@ -336,30 +346,11 @@ void logger_rtc_update(struct logger_data_rtc_temp d) {
 
 }
 
-void logger_serial_process(char * buffer) {
-  DeserializationError error = deserializeJson(logger_rtc_json_buffer, buffer);
-
-  if (error) {
-    #ifdef SERIAL_DEBUG
-    Serial.print(F("deserializeJson() failed: "));
-    Serial.println(error.f_str());
-    #endif
-
-    logger_lcd_write_string("deserializeJson() failed: ");
-
-    return;
-  } else {
-
-    logger.data_rtc_year = (uint16_t)logger_rtc_json_buffer["yy"];
-    logger.data_rtc_month = (uint8_t)logger_rtc_json_buffer["mm"];
-    logger.data_rtc_day = (uint8_t)logger_rtc_json_buffer["dd"];
-    logger.data_rtc_hour = (uint8_t)logger_rtc_json_buffer["h"];
-    logger.data_rtc_minute = (uint8_t)logger_rtc_json_buffer["m"];
-    logger.data_rtc_second = (uint8_t)logger_rtc_json_buffer["s"];    
-  }  
-}
-
-// function to print a device address
+/**
+ * @brief function to print a device address
+ * 
+ * @param deviceAddress address of temperature sensor
+ */
 void logger_sensor_printaddr(DeviceAddress deviceAddress) {
   for (uint8_t i = 0; i < 8; i++) {
     if (deviceAddress[i] < 16) Serial.print("0");
@@ -384,11 +375,9 @@ void setup(void) {
   logger_lcd_16x2.clear();  
   logger_lcd_write_string("Nepal Digital Systems Pvt. Ltd.");
   delay(5000);
-  logger_lcd_write_string("Lalitpur. Ph : 9841784514");
-  logger_lcd_16x2.scrollDisplayLeft();
+  logger_lcd_write_string("Phone :         9841784514");
   delay(5000);
-
-
+  
   if (!logger_rtc_ds1307.begin())  {
     #ifdef SERIAL_DEBUG
     Serial.println(F("Couldn't find RTC!\r\n Please reset device !"));    
@@ -397,8 +386,7 @@ void setup(void) {
     logger_lcd_write_string("Couldn't find RTC!Please reset device!");
     logger_error_global |= LOGGER_ERROR_RTC;
   }
-    
-  
+      
   if (!logger_rtc_ds1307.isrunning()) {
     #ifdef SERIAL_DEBUG
     Serial.println(F("RTC is NOT running, setting new time !"));
@@ -450,8 +438,9 @@ void setup(void) {
     #endif
   // Initialize SD card
     #ifdef SERIAL_DEBUG
-    Serial.print(F("Initializing SD card..."));
+    Serial.print(F("Initializing SD card..."));    
     #endif
+    logger_lcd_write_string("Initializing SD card...");
     
   if (!SD.begin(LOGGER_GPIO_SPI_CS))  {
     
@@ -460,13 +449,17 @@ void setup(void) {
     #ifdef SERIAL_DEBUG
     Serial.println(F("Card failed, or not present"));
     #endif
+
+    logger_lcd_write_string("Card failed, or not present");
     
     logger_error_global |= LOGGER_ERROR_SD_ACCESS;
   }
 
   #ifdef SERIAL_DEBUG
-  Serial.println(F("card initialized."));
+  Serial.println(F("card initialized."));  
   #endif
+
+  logger_lcd_write_string("card initialized.");
 
   logger_lcd_write_string("Init .... done");  
   
@@ -496,18 +489,18 @@ void loop(void) {
   // show in LCD display
   logger_lcd_write_data(logger);
 
-  if(logger.data_sensor_temperature_c > LOGGER_TMP_THRESHOLD) {
+  if(logger.data_sensor_temperature_c >= LOGGER_TMP_THRESHOLD) {
     logger_sysled_set();
   } else {
     logger_sysled_clear();
   }
 
-  logger_serial_readline(logger_buffer_serial, LOGGER_SIZE_UART_BFFR);
-  logger_serial_process(logger_buffer_serial);
-
   if((millis() - logger_log_time_prev) >= LOGGER_INTERVAL_DATA_LOG) {
+    
     logger_log_time_prev = millis();
+
     logger_log_file_handle = SD.open(LOGGER_LOG_FILENAME, FILE_WRITE);
+    
     if (logger_log_file_handle) {
       logger_file_append(logger);
       logger_log_file_handle.close();
@@ -520,7 +513,7 @@ void loop(void) {
   logger_error_clear();  
   
   #ifdef SERIAL_DEBUG
-  Serial.print(F("freeMemory()="));
+  Serial.print(F("Free RAM ="));
   Serial.println(freeMemory());
   #endif
 }
