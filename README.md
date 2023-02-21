@@ -16,7 +16,7 @@ Temperature logger using Arduino Uno.
 Logs temperature data into SD card at the interval specified by `LOGGER_INTERVAL_DATA_LOG` macro defined.
 
 ## Prototype Image
-![Prototype Image](https://github.com/nepaldigitalsystems/temperature-logger-arduino/blob/main/temperature-logger/res/snapshot.jpg)
+![Prototype Image](https://github.com/nepaldigitalsystems/temperature-logger-arduino/blob/main/res/snapshot.png)
 
 ## Usage
 
